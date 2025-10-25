@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>ClimateGlobe — protótipo</title>
+
+  <!-- Three.js (r146) and OrbitControls from CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.146.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.146.0/examples/js/controls/OrbitControls.js"></script>
+
+  <style>
+    /* Reset rápido */
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
+
+    html, body, #app { height: 100%; }
+
+    /* Layout: left 20%, center 60%, right 20% */
+    .container {
+      display: grid;
+      grid-template-columns: 20% 1fr 20%;
+      grid-template-rows: 1fr;
+      height: 100vh;
+      background: linear-gradient(180deg, #0b1020 0%, #071426 100%); /* fundo escuro */
+      color: #e6eef7;
+    }
+
+    /* ===== Left sidebar (News) ===== */
+    .sidebar-left {
+      padding: 16px;
+      overflow-y: auto;
+      border-right: 1px solid rgba(255,255,255,0.04);
+      background: linear-gradient(180deg, rgba(5,20,30,0.4), rgba(0,0,0,0.2));
+    }
+
+    .sidebar-left h2 { font-size: 1.15rem; margin-bottom: 8px; color: #cfeef5; }
+    .news-list { display:flex; flex-direction:column; gap:10px; }
+    .news-card {
+      background: rgba(255,255,255,0.02);
+      padding:10px;
+      border-radius:8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.6);
+      cursor: pointer;
+      transition: transform .12s ease;
+    }
+    .news-card:hover { transform: translateY(-3px); }
+    .news-title { font-weight:600; font-size: 0.95rem; }
+    .news-summary { font-size: 0.85rem; color: #c4d7df; margin-top:6px; }
+
+    /* ===== Center: Globe ===== */
+    .globe-area {
+      position: relative;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #globe-canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    /* small hint overlay */
+    .hint {
+      position: absolute;
+      left: 16px;
+      top: 16px;
+      background: rgba(0,0,0,0.45);
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      color: #d8f2f0;
+      backdrop-filter: blur(4px);
+    }
+
+    /* ===== Right panel (country) ===== */
+    .sidebar-right {
+      padding: 16px;
+      overflow-y: auto;
+      border-left: 1px solid rgba(255,255,255,0.04);
+      background: linear-gradient(180deg, rgba(2,10,15,0.4), rgba(0,0,0,0.2));
+    }
+
+    .sidebar-right.hidden { display: none; }
+
+    .country-name { font-size: 1.2rem; font-weight:700; color: #bfece0; }
+    .meta { font-size: .85rem; color: #99c3bf; margin-top:6px; }
+    .species-list { margin-top:12px; display:flex; flex-direction:column; gap:10px; }
+    .species-item {
+      background: rgba(255,255,255,0.02);
+      padding:10px;
+      border-radius:8px;
+      font-weight:600;
+    }
+    .species-status { font-size: .85rem; color: #ffd7d0; font-weight:600; margin-top:6px; }
+
+    /* Responsive: stacks on small screens */
+    @media (max-width: 900px) {
+      .container { grid-template-columns: 1fr; grid-template-rows: 240px 1fr auto; }
+      .sidebar-left { grid-row: 1; height: 240px; }
+      .globe-area { grid-row: 2; height: calc(100vh - 360px); }
+      .sidebar-right { grid-row: 3; height: 120px; display:flex; flex-direction:column; }
+      .sidebar-right.hidden { display: block; } /* show by default in mobile layout */
+    }
+  </style>
+</head>
+<body>
+  <div id="app" class="container">
+    <!-- LEFT: Notícias -->
+    <aside class="sidebar-left" id="newsPanel" aria-label="Notícias climáticas">
+      <h2>Notícias sobre o clima</h2>
+      <div id="newsList" class="news-list">
+        <!-- preenchido por JS -->
+      </div>
+    </aside>
+
+    <!-- CENTER: Globo -->
+    <main class="globe-area" id="globeArea" aria-label="Globo interativo">
+      <div class="hint">Clique no globo para selecionar uma região</div>
+      <canvas id="globe-canvas"></canvas>
+    </main>
+
+    <!-- RIGHT: Detalhes do país -->
+    <aside class="sidebar-right hidden" id="countryPanel" aria-label="Informações do país">
+      <div id="countryContent">
+        <div class="country-name" id="countryName">—</div>
+        <div class="meta" id="countryMeta">Clique em um ponto do globo para ver espécies ameaçadas.</div>
+
+        <div class="species-list" id="speciesList">
+          <!-- preenchido por JS -->
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <script>
+  /******************************************************************
+   * ClimateGlobe — protótipo de tela
+   *
+   * Explicação de integração:
+   * - GET /api/news -> retorna array de notícias:
+   *     [{ title, summary, source_url, published_at }]
+   *
+   * - GET /api/country-by-coords?lat=...&lon=...
+   *     -> retorna { name, iso_code, species: [{name, status}, ...] }
+   *
+   * Se esses endpoints não existirem, o script usa dados simulados.
+   *
+   * Observações:
+   * - Mapear clique no globo para lat/lon: usamos matemática simples para conversão.
+   * - Back-end pode traduzir lat/lon para país; no protótipo usamos fallback.
+   ******************************************************************/
+
+  // ---------- Utilitários e Fallbacks ----------
+  const API = {
+    news: '/api/news',
+    countryByCoords: '/api/country-by-coords' // ?lat=..&lon=..
+  };
+
+  const fallbackNews = [
+    { title: "Aquecimento acelera em regiões tropicais", summary: "Relatório mostra aumento de eventos extremos.", source_url:"#", published_at: "2025-10-10T09:00:00Z" },
+    { title: "Novo projeto de restauração de manguezais", summary: "Comunidades locais plantam milhares de mudas.", source_url:"#", published_at: "2025-09-27T12:00:00Z" },
+    { title: "Espécies marinhas migratórias em perigo", summary: "Pesca e correntes alteradas ameaçam rotas.", source_url:"#", published_at: "2025-09-15T08:00:00Z" }
+  ];
+
+  const fallbackCountryForCoords = (lat, lon) => {
+    // Simples heurística: dependendo do longitude devolve um país de exemplo.
+    if (lon > -80 && lon < -30 && lat > -60 && lat < 15) {
+      return {
+        name: "Brasil",
+        iso_code: "BR",
+        species: [
+          { name: "Arara-azul", status: "Vulnerável" },
+          { name: "Onça-pintada", status: "Quase Ameaçada" },
+          { name: "Mico-leão-dourado", status: "Em perigo" }
+        ]
+      };
+    } else if (lon >= -10 && lon <= 50) {
+      return {
+        name: "Nigéria",
+        iso_code: "NG",
+        species: [
+          { name: "Gorila-das-montanhas", status: "Criticamente em perigo" },
+          { name: "Tartaruga-de-couro", status: "Ameaçada" }
+        ]
+      };
+    } else {
+      return {
+        name: "Austrália",
+        iso_code: "AU",
+        species: [
+          { name: "Coala", status: "Vulnerável" },
+          { name: "Diabo-da-tasmânia", status: "Em perigo" }
+        ]
+      };
+    }
+  };
+
+  // ---------- Notícia: carregar e renderizar ----------
+  async function loadNews() {
+    const container = document.getElementById('newsList');
+    container.innerHTML = '<div style="opacity:.6">Carregando...</div>';
+    try {
+      const res = await fetch(API.news);
+      if (!res.ok) throw new Error('fetch news não ok');
+      const data = await res.json();
+      renderNewsList(data);
+    } catch (err) {
+      // fallback
+      console.warn('Não foi possível carregar notícias do backend, usando dados simulados.', err);
+      renderNewsList(fallbackNews);
+    }
+  }
+
+  function renderNewsList(items) {
+    const container = document.getElementById('newsList');
+    container.innerHTML = '';
+    items.forEach(n => {
+      const card = document.createElement('div');
+      card.className = 'news-card';
+      card.innerHTML = `<div class="news-title">${escapeHtml(n.title)}</div>
+                        <div class="news-summary">${escapeHtml(n.summary || '')}</div>`;
+      card.addEventListener('click', () => {
+        window.open(n.source_url || '#', '_blank');
+      });
+      container.appendChild(card);
+    });
+  }
+
+  // ---------- País: buscar por coordenadas ----------
+  async function fetchCountryByCoords(lat, lon) {
+    try {
+      const url = new URL(API.countryByCoords, window.location.origin);
+      url.searchParams.set('lat', lat);
+      url.searchParams.set('lon', lon);
+      const res = await fetch(url.toString());
+      if (!res.ok) throw new Error('fetch country não ok');
+      const data = await res.json();
+      return data;
+    } catch (err) {
+      console.warn('Backend country lookup falhou, usando fallback local.', err);
+      return fallbackCountryForCoords(lat, lon);
+    }
+  }
+
+  function showCountryPanel(country) {
+    const panel = document.getElementById('countryPanel');
+    panel.classList.remove('hidden');
+    document.getElementById('countryName').textContent = country.name + (country.iso_code ? ' ('+country.iso_code+')' : '');
+    document.getElementById('countryMeta').textContent = `Espécies registradas: ${country.species ? country.species.length : 0}`;
+
+    const list = document.getElementById('speciesList');
+    list.innerHTML = '';
+    if (country.species && country.species.length) {
+      country.species.forEach(s => {
+        const it = document.createElement('div');
+        it.className = 'species-item';
+        it.innerHTML = `<div>${escapeHtml(s.name)}</div><div class="species-status">${escapeHtml(s.status)}</div>`;
+        list.appendChild(it);
+      });
+    } else {
+      list.innerHTML = '<div style="opacity:.7">Nenhuma espécie encontrada.</div>';
+    }
+  }
+
+  // ---------- Segurança básica: escape HTML ----------
+  function escapeHtml(unsafe) {
+    if (!unsafe) return '';
+    return unsafe.replace(/[&<"'>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
+  }
+
+  // ---------- GLOBO: Three.js ----------
+  let scene, camera, renderer, controls, globeMesh, raycaster, mouse;
+
+  function initGlobe() {
+    const canvas = document.getElementById('globe-canvas');
+    renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+    renderer.setPixelRatio(window.devicePixelRatio || 1);
+    renderer.setSize(canvas.clientWidth || canvas.offsetWidth, canvas.clientHeight || canvas.offsetHeight);
+
+    scene = new THREE.Scene();
+
+    const fov = 50;
+    const aspect = canvas.clientWidth / canvas.clientHeight;
+    camera = new THREE.PerspectiveCamera(fov, aspect, 0.1, 1000);
+    camera.position.set(0, 0, 3.2);
+
+    controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enablePan = false;
+    controls.minDistance = 1.8;
+    controls.maxDistance = 6;
+    controls.autoRotate = false;
+    controls.rotateSpeed = 0.6;
+
+    // luz suave
+    const hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 1.0);
+    scene.add(hemi);
+    const dir = new THREE.DirectionalLight(0xffffff, 0.6);
+    dir.position.set(5,3,5);
+    scene.add(dir);
+
+    // esfera da Terra
+    const geometry = new THREE.SphereGeometry(1, 64, 64);
+
+    // textura: usamos imagens públicas (cdn). Caso bloqueado, fallback para cor sólida.
+    const loader = new THREE.TextureLoader();
+    const earthTextureURL = 'https://cdn.jsdelivr.net/gh/planetaryjs/planetary.js@master/img/earth-light.jpg';
+    loader.load(
+      earthTextureURL,
+      (texture) => {
+        const mat = new THREE.MeshPhongMaterial({ map: texture });
+        globeMesh = new THREE.Mesh(geometry, mat);
+        scene.add(globeMesh);
+        animate();
+      },
+      undefined,
+      (err) => {
+        console.warn('Falha ao carregar textura do mapa. Usando material simples.', err);
+        const mat = new THREE.MeshPhongMaterial({ color: 0x123b49, shininess: 5 });
+        globeMesh = new THREE.Mesh(geometry, mat);
+        scene.add(globeMesh);
+        animate();
+      }
+    );
+
+    // sutil atmosfera (opcional)
+    const atmosphereMat = new THREE.MeshPhongMaterial({
+      color: 0x1b6fa4,
+      transparent: true,
+      opacity: 0.06,
+      side: THREE.BackSide
+    });
+    const atmosphere = new THREE.Mesh(new THREE.SphereGeometry(1.02, 64, 64), atmosphereMat);
+    scene.add(atmosphere);
+
+    raycaster = new THREE.Raycaster();
+    mouse = new THREE.Vector2();
+
+    // eventos
+    window.addEventListener('resize', onWindowResize);
+    renderer.domElement.addEventListener('pointerdown', onPointerDown);
+
+    // ensure correct initial size
+    onWindowResize();
+  }
+
+  function onWindowResize() {
+    const canvas = renderer.domElement;
+    const width = canvas.clientWidth || canvas.offsetWidth;
+    const height = canvas.clientHeight || canvas.offsetHeight;
+    camera.aspect = width / Math.max(1, height);
+    camera.updateProjectionMatrix();
+    renderer.setSize(width, height, false);
+  }
+
+  function animate() {
+    requestAnimationFrame(animate);
+    controls.update();
+    renderer.render(scene, camera);
+  }
+
+  // Calcula lat/lon a partir do ponto de interseção no globo (em coordenadas do mundo)
+  function worldToLatLon(point) {
+    // point é THREE.Vector3 no espaço do mundo
+    const x = point.x, y = point.y, z = point.z;
+    const lat = 90 - (Math.acos(y / Math.sqrt(x*x + y*y + z*z)) * 180 / Math.PI);
+    const lon = (Math.atan2(z, x) * 180 / Math.PI);
+    return { lat: lat, lon: lon };
+  }
+
+  async function onPointerDown(event) {
+    // normaliza posição do mouse
+    const rect = renderer.domElement.getBoundingClientRect();
+    mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    mouse.y = - ((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+    raycaster.setFromCamera(mouse, camera);
+    const intersects = raycaster.intersectObjects([globeMesh], true);
+    if (intersects.length > 0) {
+      const pt = intersects[0].point;
+      const coords = worldToLatLon(pt);
+
+      // mostrar loading temporário
+      document.getElementById('countryName').textContent = 'Buscando país...';
+      document.getElementById('countryMeta').textContent = `Lat: ${coords.lat.toFixed(2)}, Lon: ${coords.lon.toFixed(2)}`;
+
+      // buscar no backend
+      const country = await fetchCountryByCoords(coords.lat, coords.lon);
+      showCountryPanel(country);
+    }
+  }
+
+  // inicialização
+  (function main() {
+    initGlobe();
+    loadNews();
+
+    // se desejar buscar notícias periodicamente:
+    // setInterval(loadNews, 1000 * 60 * 10); // a cada 10 min
+  })();
+
+  </script>
+</body>
+</html>
